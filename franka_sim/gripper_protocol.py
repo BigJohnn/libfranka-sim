@@ -3,7 +3,8 @@ import struct
 from dataclasses import dataclass
 
 # Standard command port for Franka robot interface
-COMMAND_PORT = 1337
+COMMAND_PORT = 1338
+
 class Command(enum.IntEnum):
     """Commands supported by the Franka robot interface protocol"""
 
@@ -132,7 +133,7 @@ class MessageHeader:
     @classmethod
     def from_bytes(cls, data: bytes) -> "MessageHeader":
         """Parse header from binary data using little-endian format"""
-        command, command_id, size = struct.unpack("<III", data)
+        command, command_id, size = struct.unpack("<IIIBB", data)
         return cls(Command(command), command_id, size)
 
     def to_bytes(self) -> bytes:

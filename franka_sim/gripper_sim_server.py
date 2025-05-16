@@ -12,43 +12,39 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 from franka_sim.franka_genesis_sim import ControlMode, FrankaGenesisSim
-from franka_sim.franka_protocol import (
+from franka_sim.gripper_protocol import (
     COMMAND_PORT,
     Command,
     ConnectStatus,
-    ControllerMode,
-    LibfrankaControllerMode,
-    LibfrankaMotionGeneratorMode,
+    # ControllerMode,
+    # LibfrankaControllerMode,
+    # LibfrankaMotionGeneratorMode,
     MessageHeader,
-    MotionGeneratorMode,
+    # MotionGeneratorMode,
     MoveCommand,
     MoveStatus,
-    SetCartesianImpedanceCommand,
-    SetCollisionBehaviorCommand,
-    SetJointImpedanceCommand,
-    convert_to_libfranka_controller_mode,
-    convert_to_libfranka_motion_mode,
+    # SetCartesianImpedanceCommand,
+    # SetCollisionBehaviorCommand,
+    # SetJointImpedanceCommand,
+    # convert_to_libfranka_controller_mode,
+    # convert_to_libfranka_motion_mode,
 )
-from franka_sim.robot_state import RobotState
+from franka_sim.gripper_state import GripperState
 
 # Configure detailed logging for debugging
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
-class RobotMode(enum.IntEnum):
+class GripperMode(enum.IntEnum):
     """Operating modes of the Franka robot"""
 
     kOther = 0
     kIdle = 1
-    kMove = 2
-    kGuiding = 3
-    kReflex = 4
-    kUserStopped = 5
-    kAutomaticErrorRecovery = 6
+    kGrasp = 2
 
 
-class FrankaSimServer:
+class GripperSimServer:
     """
     A simulation server implementing the Franka robot control interface protocol.
     Handles both TCP command communication and UDP state updates.
@@ -88,7 +84,7 @@ class FrankaSimServer:
         else:
             self.genesis_sim = genesis_sim
 
-        self.robot_state = RobotState()
+        self.robot_state = GripperState()
 
     def reset_state(self):
         """Reset all connection-specific state variables for a new connection"""
@@ -101,7 +97,7 @@ class FrankaSimServer:
         self.client_udp_port = None
         self.control_mode = ControlMode.NONE
         self.connection_running = False
-        self.robot_state = RobotState()  # Create fresh robot state for new connection
+        self.robot_state = GripperState()  # Create fresh robot state for new connection
 
     def receive_exact(self, sock: socket.socket, size: int) -> Optional[bytes]:
         """
@@ -141,18 +137,18 @@ class FrankaSimServer:
         Returns:
             Tuple of (MessageHeader, Optional[payload])
         """
-        logger.debug("Attempting to receive message header (12 bytes)...")
-        header_data = self.receive_exact(client_socket, 12)
+        logger.debug("Attempting to receive message header (14 bytes)...")
+        header_data = self.receive_exact(client_socket, 14)
         if not header_data:
             raise ConnectionError("Failed to receive message header")
 
         header = MessageHeader.from_bytes(header_data)
         logger.debug(
-            f"Parsed header: command={Command(header.command).name}, "
+            f"[Gripper] Parsed header: command={Command(header.command).name}, "
             f"command_id={header.command_id}, size={header.size}"
         )
 
-        payload_size = header.size - 12
+        payload_size = header.size - 14
         payload = None
         if payload_size > 0:
             logger.debug(f"Expecting payload of {payload_size} bytes")
@@ -237,44 +233,27 @@ class FrankaSimServer:
                         offset += 8
 
                         # Unpack MotionGeneratorCommand
-                        q_c = struct.unpack("<7d", data[offset : offset + 56])
-                        offset += 56
+                        width = struct.unpack("<d", data[offset : offset + 8])
+                        offset += 8
 
-                        dq_c = struct.unpack("<7d", data[offset : offset + 56])
-                        offset += 56
+                        max_width = struct.unpack("<d", data[offset : offset + 8])
+                        offset += 8
 
-                        O_T_EE_c = struct.unpack("<16d", data[offset : offset + 128])
-                        offset += 128
+                        is_grasped = struct.unpack("<d", data[offset : offset + 8])
+                        offset += 8
 
-                        O_dP_EE_c = struct.unpack("<6d", data[offset : offset + 48])
-                        offset += 48
+                        temperature = struct.unpack("<d", data[offset : offset + 8])
+                        offset += 8
 
-                        elbow_c = struct.unpack("<2d", data[offset : offset + 16])
-                        offset += 16
-
-                        valid_elbow = bool(data[offset])
-                        offset += 1
-
-                        motion_generation_finished = bool(data[offset])
-                        offset += 1
-
-                        # Unpack ControllerCommand
-                        tau_J_d = struct.unpack("<7d", data[offset : offset + 56])
-                        offset += 56
-
-                        torque_command_finished = bool(data[offset])
+                        time = struct.unpack("<d", data[offset : offset + 8])
 
                         command = {
                             "message_id": message_id,
-                            "q_c": q_c,
-                            "dq_c": dq_c,
-                            "O_T_EE_c": O_T_EE_c,
-                            "O_dP_EE_c": O_dP_EE_c,
-                            "elbow_c": elbow_c,
-                            "valid_elbow": valid_elbow,
-                            "motion_generation_finished": motion_generation_finished,
-                            "tau_J_d": tau_J_d,
-                            "torque_command_finished": torque_command_finished,
+                            "width": width,
+                            "max_width": max_width,
+                            "is_grasped": is_grasped,
+                            "temperature": temperature,
+                            "time": time,
                         }
 
                     except BlockingIOError:
@@ -328,47 +307,47 @@ class FrankaSimServer:
                         continue
 
                     # Update Genesis simulator based on control mode
-                    if (
-                        self.robot_state.state["controller_mode"]
-                        == LibfrankaControllerMode.kJointImpedance
-                        and self.robot_state.state["motion_generator_mode"]
-                        == LibfrankaMotionGeneratorMode.kJointPosition
-                    ):
-                        if self.control_mode is not ControlMode.POSITION:
-                            logger.info("Setting control mode to POSITION")
-                            self.genesis_sim.set_control_mode(ControlMode.POSITION)
-                            self.control_mode = ControlMode.POSITION
-                            # Initialize q_d to current q when first entering position mode
-                            self.robot_state.state["q_d"] = self.robot_state.state["q"]
-                        # Update q_d with commanded positions
-                        self.robot_state.state["q_d"] = list(command["q_c"])
-                        self.genesis_sim.update_joint_positions(command["q_c"])
-                        self.genesis_sim.update_torques([0.0] * 7)
-                    elif (
-                        self.robot_state.state["controller_mode"]
-                        == LibfrankaControllerMode.kJointImpedance
-                        and self.robot_state.state["motion_generator_mode"]
-                        == LibfrankaMotionGeneratorMode.kJointVelocity
-                    ):
-                        if self.control_mode is not ControlMode.VELOCITY:
-                            logger.info("Setting control mode to VELOCITY")
-                            self.genesis_sim.set_control_mode(ControlMode.VELOCITY)
-                            self.control_mode = ControlMode.VELOCITY
-                        # Update dq_d with commanded velocities
-                        self.robot_state.state["dq_d"] = list(command["dq_c"])
-                        self.genesis_sim.update_joint_velocities(command["dq_c"])
-                        self.genesis_sim.update_torques([0.0] * 7)
-                    elif (
-                        self.robot_state.state["controller_mode"]
-                        == LibfrankaControllerMode.kExternalController
-                    ):
-                        if self.control_mode is not ControlMode.TORQUE:
-                            logger.info("Setting control mode to TORQUE")
-                            self.genesis_sim.set_control_mode(ControlMode.TORQUE)
-                            self.control_mode = ControlMode.TORQUE
-                        # Update tau_J_d with commanded torques
-                        self.robot_state.state["tau_J_d"] = list(command["tau_J_d"])
-                        self.genesis_sim.update_torques(command["tau_J_d"])
+                    # if (
+                    #     self.robot_state.state["controller_mode"]
+                    #     == LibfrankaControllerMode.kJointImpedance
+                    #     and self.robot_state.state["motion_generator_mode"]
+                    #     == LibfrankaMotionGeneratorMode.kJointPosition
+                    # ):
+                    #     if self.control_mode is not ControlMode.POSITION:
+                    #         logger.info("Setting control mode to POSITION")
+                    #         self.genesis_sim.set_control_mode(ControlMode.POSITION)
+                    #         self.control_mode = ControlMode.POSITION
+                    #         # Initialize q_d to current q when first entering position mode
+                    #         self.robot_state.state["q_d"] = self.robot_state.state["q"]
+                    #     # Update q_d with commanded positions
+                    #     self.robot_state.state["q_d"] = list(command["q_c"])
+                    #     self.genesis_sim.update_joint_positions(command["q_c"])
+                    #     self.genesis_sim.update_torques([0.0] * 7)
+                    # elif (
+                    #     self.robot_state.state["controller_mode"]
+                    #     == LibfrankaControllerMode.kJointImpedance
+                    #     and self.robot_state.state["motion_generator_mode"]
+                    #     == LibfrankaMotionGeneratorMode.kJointVelocity
+                    # ):
+                    #     if self.control_mode is not ControlMode.VELOCITY:
+                    #         logger.info("Setting control mode to VELOCITY")
+                    #         self.genesis_sim.set_control_mode(ControlMode.VELOCITY)
+                    #         self.control_mode = ControlMode.VELOCITY
+                    #     # Update dq_d with commanded velocities
+                    #     self.robot_state.state["dq_d"] = list(command["dq_c"])
+                    #     self.genesis_sim.update_joint_velocities(command["dq_c"])
+                    #     self.genesis_sim.update_torques([0.0] * 7)
+                    # elif (
+                    #     self.robot_state.state["controller_mode"]
+                    #     == LibfrankaControllerMode.kExternalController
+                    # ):
+                    #     if self.control_mode is not ControlMode.TORQUE:
+                    #         logger.info("Setting control mode to TORQUE")
+                    #         self.genesis_sim.set_control_mode(ControlMode.TORQUE)
+                    #         self.control_mode = ControlMode.TORQUE
+                    #     # Update tau_J_d with commanded torques
+                    #     self.robot_state.state["tau_J_d"] = list(command["tau_J_d"])
+                    #     self.genesis_sim.update_torques(command["tau_J_d"])
 
         except Exception as e:
             logger.error(f"Error in read_step: {e}")
@@ -393,50 +372,50 @@ class FrankaSimServer:
                 f"motion_generator_mode={move_cmd.motion_generator_mode.name}"
             )
 
-            # Validate controller mode
-            try:
-                ControllerMode(move_cmd.controller_mode)
-            except ValueError:
-                logger.error(
-                    f"Error handling Move command:\
-                          {move_cmd.controller_mode} is not a valid ControllerMode"
-                )
-                self.send_move_response(
-                    client_socket,
-                    command_id=header.command_id,
-                    status=MoveStatus.kInvalidArgumentRejected,
-                )
-                return
+            # # Validate controller mode
+            # try:
+            #     ControllerMode(move_cmd.controller_mode)
+            # except ValueError:
+            #     logger.error(
+            #         f"Error handling Move command:\
+            #               {move_cmd.controller_mode} is not a valid ControllerMode"
+            #     )
+            #     self.send_move_response(
+            #         client_socket,
+            #         command_id=header.command_id,
+            #         status=MoveStatus.kInvalidArgumentRejected,
+            #     )
+            #     return
 
-            # Update robot state
-            self.robot_state.set_motion_generator_mode(
-                convert_to_libfranka_motion_mode(move_cmd.motion_generator_mode)
-            )
-            self.robot_state.set_controller_mode(
-                convert_to_libfranka_controller_mode(move_cmd.controller_mode)
-            )
-            self.robot_state.state["robot_mode"] = RobotMode.kMove
-            self.current_motion_id = header.command_id
+            # # Update robot state
+            # self.robot_state.set_motion_generator_mode(
+            #     convert_to_libfranka_motion_mode(move_cmd.motion_generator_mode)
+            # )
+            # self.robot_state.set_controller_mode(
+            #     convert_to_libfranka_controller_mode(move_cmd.controller_mode)
+            # )
+            # self.robot_state.state["robot_mode"] = RobotMode.kMove
+            # self.current_motion_id = header.command_id
 
-            # Set appropriate control mode in Genesis simulator
-            if (
-                move_cmd.controller_mode == ControllerMode.kJointImpedance
-                and move_cmd.motion_generator_mode == MotionGeneratorMode.kJointPosition
-            ):
-                logger.info("Setting control mode to POSITION")
-                self.genesis_sim.set_control_mode(ControlMode.POSITION)
-                self.control_mode = ControlMode.POSITION
-            elif (
-                move_cmd.controller_mode == ControllerMode.kJointImpedance
-                and move_cmd.motion_generator_mode == MotionGeneratorMode.kJointVelocity
-            ):
-                logger.info("Setting control mode to VELOCITY")
-                self.genesis_sim.set_control_mode(ControlMode.VELOCITY)
-                self.control_mode = ControlMode.VELOCITY
-            elif move_cmd.controller_mode == ControllerMode.kExternalController:
-                logger.info("Setting control mode to TORQUE")
-                self.genesis_sim.set_control_mode(ControlMode.TORQUE)
-                self.control_mode = ControlMode.TORQUE
+            # # Set appropriate control mode in Genesis simulator
+            # if (
+            #     move_cmd.controller_mode == ControllerMode.kJointImpedance
+            #     and move_cmd.motion_generator_mode == MotionGeneratorMode.kJointPosition
+            # ):
+            #     logger.info("Setting control mode to POSITION")
+            #     self.genesis_sim.set_control_mode(ControlMode.POSITION)
+            #     self.control_mode = ControlMode.POSITION
+            # elif (
+            #     move_cmd.controller_mode == ControllerMode.kJointImpedance
+            #     and move_cmd.motion_generator_mode == MotionGeneratorMode.kJointVelocity
+            # ):
+            #     logger.info("Setting control mode to VELOCITY")
+            #     self.genesis_sim.set_control_mode(ControlMode.VELOCITY)
+            #     self.control_mode = ControlMode.VELOCITY
+            # elif move_cmd.controller_mode == ControllerMode.kExternalController:
+            #     logger.info("Setting control mode to TORQUE")
+            #     self.genesis_sim.set_control_mode(ControlMode.TORQUE)
+            #     self.control_mode = ControlMode.TORQUE
 
             # First send motion started response
             logger.info("Sending kMotionStarted response")
@@ -476,173 +455,6 @@ class FrankaSimServer:
         except Exception as e:
             logger.error(f"Error sending Move response: {e}", exc_info=True)
 
-    def handle_stop_move_command(self, client_socket, header: MessageHeader):
-        """Handle StopMove command received over TCP"""
-        try:
-            logger.info("Processing StopMove command")
-
-            # Send success response for StopMove first
-            total_size = 12 + 4  # Header (12) + status (1) + padding (3)
-            response_header = MessageHeader(Command.kStopMove, header.command_id, total_size)
-            header_bytes = response_header.to_bytes()
-
-            # Status 0 = Success
-            response_data = struct.pack("<B3x", 0)  # 1 byte status + 3 bytes padding
-
-            client_socket.sendall(header_bytes + response_data)
-            logger.info("Sent StopMove success response")
-
-            # Switch to position control and hold current position
-            if self.control_mode != ControlMode.POSITION:
-                logger.info("Switching to position control mode and holding current position")
-                current_joint_positions = self.genesis_sim.get_robot_state()["q"]
-                self.genesis_sim.set_control_mode(ControlMode.POSITION)
-                self.control_mode = ControlMode.POSITION
-                self.genesis_sim.update_joint_positions(current_joint_positions)
-                self.genesis_sim.update_torques([0.0] * 7)
-
-            # Send one final state with both modes set to idle
-            if hasattr(self, "udp_socket") and self.udp_socket:
-                # Update state to idle modes
-                self.robot_state.state["motion_generator_mode"] = 0  # kNone
-                self.robot_state.state["controller_mode"] = 3  # kOther
-                self.robot_state.state["robot_mode"] = RobotMode.kIdle
-
-                # Send state with new message ID
-                self.robot_state.update()  # This increments message_id
-                final_state = self.robot_state.pack_state()
-                self.udp_socket.sendto(final_state, (self.client_address, self.client_udp_port))
-                logger.info(
-                    f"Sent final robot state with message_id:\
-                          {self.robot_state.state['message_id']}"
-                )
-
-            # Stop robot state transmission
-            self.transmitting_state = False
-            logger.info("Stopped robot state transmission")
-
-            # Send Move response to break the waiting loop in the client
-            if self.current_motion_id:
-                # Create a Move response header
-                move_response_header = MessageHeader(Command.kMove, self.current_motion_id, 16)
-                move_header_bytes = move_response_header.to_bytes()
-                move_response_data = struct.pack("<B3x", MoveStatus.kSuccess)
-                client_socket.sendall(move_header_bytes + move_response_data)
-                logger.info(f"Sent Move success response for motion ID: {self.current_motion_id}")
-                self.current_motion_id = 0
-
-            # Set connection_running to False instead of self.running
-            self.connection_running = False
-
-        except Exception as e:
-            logger.error(f"Error handling StopMove command: {e}")
-            # Send error response
-            total_size = 12 + 4
-            response_header = MessageHeader(Command.kStopMove, header.command_id, total_size)
-            header_bytes = response_header.to_bytes()
-            response_data = struct.pack("<B3x", 5)  # Status 5 = Aborted
-            client_socket.sendall(header_bytes + response_data)
-
-    def handle_set_collision_behavior_command(
-        self, client_socket, header: MessageHeader, payload: bytes
-    ):
-        """Handle SetCollisionBehavior command received over TCP"""
-        try:
-            # Parse the command
-            cmd = SetCollisionBehaviorCommand.from_bytes(payload)
-            logger.info("Received SetCollisionBehavior command with values:")
-            logger.debug(f"Lower torque thresholds acc: {cmd.lower_torque_thresholds_acceleration}")
-            logger.debug(f"Upper torque thresholds acc: {cmd.upper_torque_thresholds_acceleration}")
-
-            # For now, just acknowledge the command without actually implementing behavior
-            # Send success response (status = 0)
-            total_size = 12 + 4  # Header (12) + status (1) + padding (3)
-            response_header = MessageHeader(
-                Command.kSetCollisionBehavior, header.command_id, total_size
-            )
-            header_bytes = response_header.to_bytes()
-            response_data = struct.pack("<B3x", 0)  # 1 byte status + 3 bytes padding
-
-            client_socket.sendall(header_bytes + response_data)
-            logger.info("Sent SetCollisionBehavior success response")
-
-        except Exception as e:
-            logger.error(f"Error handling SetCollisionBehavior command: {e}")
-            # Send error response (status = 1)
-            total_size = 12 + 4
-            response_header = MessageHeader(
-                Command.kSetCollisionBehavior, header.command_id, total_size
-            )
-            header_bytes = response_header.to_bytes()
-            response_data = struct.pack("<B3x", 1)  # Status 1 = Error
-            client_socket.sendall(header_bytes + response_data)
-
-    def handle_set_joint_impedance_command(
-        self, client_socket, header: MessageHeader, payload: bytes
-    ):
-        """Handle SetJointImpedance command received over TCP"""
-        try:
-            # Parse the command
-            cmd = SetJointImpedanceCommand.from_bytes(payload)
-            logger.info("Received SetJointImpedance command with values:")
-            logger.debug(f"Joint stiffness values: {cmd.K_theta}")
-
-            # For now, just acknowledge the command without actually implementing behavior
-            # Send success response (status = 0)
-            total_size = 12 + 4  # Header (12) + status (1) + padding (3)
-            response_header = MessageHeader(
-                Command.kSetJointImpedance, header.command_id, total_size
-            )
-            header_bytes = response_header.to_bytes()
-            response_data = struct.pack("<B3x", 0)  # 1 byte status + 3 bytes padding
-
-            client_socket.sendall(header_bytes + response_data)
-            logger.info("Sent SetJointImpedance success response")
-
-        except Exception as e:
-            logger.error(f"Error handling SetJointImpedance command: {e}")
-            # Send error response (status = 1)
-            total_size = 12 + 4
-            response_header = MessageHeader(
-                Command.kSetJointImpedance, header.command_id, total_size
-            )
-            header_bytes = response_header.to_bytes()
-            response_data = struct.pack("<B3x", 1)  # Status 1 = Error
-            client_socket.sendall(header_bytes + response_data)
-
-    def handle_set_cartesian_impedance_command(
-        self, client_socket, header: MessageHeader, payload: bytes
-    ):
-        """Handle SetCartesianImpedance command received over TCP"""
-        try:
-            # Parse the command
-            cmd = SetCartesianImpedanceCommand.from_bytes(payload)
-            logger.info("Received SetCartesianImpedance command with values:")
-            logger.debug(f"Cartesian stiffness values: {cmd.K_x}")
-
-            # For now, just acknowledge the command without actually implementing behavior
-            # Send success response (status = 0)
-            total_size = 12 + 4  # Header (12) + status (1) + padding (3)
-            response_header = MessageHeader(
-                Command.kSetCartesianImpedance, header.command_id, total_size
-            )
-            header_bytes = response_header.to_bytes()
-            response_data = struct.pack("<B3x", 0)  # 1 byte status + 3 bytes padding
-
-            client_socket.sendall(header_bytes + response_data)
-            logger.info("Sent SetCartesianImpedance success response")
-
-        except Exception as e:
-            logger.error(f"Error handling SetCartesianImpedance command: {e}")
-            # Send error response (status = 1)
-            total_size = 12 + 4
-            response_header = MessageHeader(
-                Command.kSetCartesianImpedance, header.command_id, total_size
-            )
-            header_bytes = response_header.to_bytes()
-            response_data = struct.pack("<B3x", 1)  # Status 1 = Error
-            client_socket.sendall(header_bytes + response_data)
-
     def handle_tcp_messages(self, client_socket):
         """Handle TCP messages in a separate thread"""
         logger.info("TCP message handler thread started")
@@ -664,7 +476,7 @@ class FrankaSimServer:
                 if not readable:
                     continue
 
-                logger.debug("Data available on socket, attempting to receive...")
+                logger.debug("Gripper Data available on socket, attempting to receive...")
                 header, payload = self.receive_message(client_socket)
                 logger.info(
                     f"Processing command: {Command(header.command).name} (ID: {header.command_id})"
@@ -673,19 +485,7 @@ class FrankaSimServer:
                 if header.command == Command.kMove:
                     logger.debug(f"Move command payload size: {len(payload)} bytes")
                     logger.debug(f"Move command payload hex: {payload.hex()}")
-                    self.handle_move_command(client_socket, header, payload)
-                elif header.command == Command.kStopMove:
-                    logger.info("Handling StopMove command")
-                    self.handle_stop_move_command(client_socket, header)
-                elif header.command == Command.kSetCollisionBehavior:
-                    logger.info("Handling SetCollisionBehavior command")
-                    self.handle_set_collision_behavior_command(client_socket, header, payload)
-                elif header.command == Command.kSetJointImpedance:
-                    logger.info("Handling SetJointImpedance command")
-                    self.handle_set_joint_impedance_command(client_socket, header, payload)
-                elif header.command == Command.kSetCartesianImpedance:
-                    logger.info("Handling SetCartesianImpedance command")
-                    self.handle_set_cartesian_impedance_command(client_socket, header, payload)
+                    # self.handle_move_command(client_socket, header, payload)
                 else:
                     logger.warning(
                         f"Unhandled command in TCP thread: {Command(header.command).name}"
@@ -966,7 +766,7 @@ class FrankaSimServer:
             logger.info("Starting server and simulation")
 
             # Initialize Genesis simulator first
-            self.genesis_sim.initialize_simulation()
+            # self.genesis_sim.initialize_simulation()
             logger.info("Genesis simulation initialized")
 
             if self.genesis_sim.enable_vis:
@@ -974,17 +774,17 @@ class FrankaSimServer:
                 server_thread = threading.Thread(target=self.run_server)
                 server_thread.daemon = True
                 server_thread.start()
-                logger.info("Server running in background thread")
+                logger.info("Gripper Server running in background thread")
 
                 # Start Genesis simulator (visualization) in main thread
-                logger.info("Starting Genesis simulator with visualization")
-                self.genesis_sim.start()
+                # logger.info("Starting Genesis simulator with visualization")
+                # self.genesis_sim.start()
             else:
                 # Without visualization, run server in main thread
                 logger.info("Starting TCP/UDP server")
                 self.run_server()
                 # Start Genesis simulator without visualization
-                self.genesis_sim.start()
+                # self.genesis_sim.start()
 
         except Exception as e:
             logger.error(f"Server start error: {e}", exc_info=True)
@@ -1073,7 +873,7 @@ def main():
     )
     args = parser.parse_args()
 
-    server = FrankaSimServer(enable_vis=args.vis)
+    server = GripperSimServer(enable_vis=args.vis)
     try:
         server.start()
     except KeyboardInterrupt:
