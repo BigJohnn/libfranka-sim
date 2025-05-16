@@ -4,8 +4,6 @@ from dataclasses import dataclass
 
 # Standard command port for Franka robot interface
 COMMAND_PORT = 1337
-
-
 class Command(enum.IntEnum):
     """Commands supported by the Franka robot interface protocol"""
 

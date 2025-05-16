@@ -2,10 +2,11 @@
 import argparse
 import logging
 
-from franka_sim import FrankaSimServer
+from franka_sim import FrankaSimServer, GripperSimServer
+import threading
 
 # Configure logging to silence Numba debug output
-logging.getLogger("numba").setLevel(logging.WARNING)
+logging.getLogger("numba").setLevel(logging.DEBUG)
 
 
 def main():
@@ -26,8 +27,22 @@ def main():
     print("Press Ctrl+C to stop the server")
 
     server = FrankaSimServer(enable_vis=args.vis)
+
+    logging.info("Starting Gripper simulation server...")
+    gripper_server = GripperSimServer(enable_vis=args.vis, genesis_sim=server.genesis_sim)
     try:
-        server.start()
+        logging.info("--------------")
+        arm_thread = threading.Thread(target=server.start)
+        gripper_thread = threading.Thread(target=gripper_server.start)
+
+        arm_thread.start()
+        logging.info("arm server started in a separate thread")
+        gripper_thread.start()
+        logging.info("gripper server started in a separate thread")
+
+        arm_thread.join()
+        gripper_thread.join()
+
     except KeyboardInterrupt:
         print("\nShutting down server...")
         server.stop()
