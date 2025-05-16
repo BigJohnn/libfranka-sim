@@ -11,6 +11,7 @@ from pathlib import Path
 import genesis as gs
 import numpy as np
 
+from franka_sim.gripper_protocol import GraspCommand, MoveCommand
 # import pinocchio as pin
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,8 @@ class FrankaGenesisSim:
         self.dt = 0.01  # Simulation timestep
         self.sim_thread = None
         self.ddq_filtered = np.zeros(9)
-
+        self.gripper_positions = [0.04, 0.04]  # Initial gripper positions
+        
         # Get the Genesis assets path instead of our own
         import genesis
 
@@ -56,6 +58,8 @@ class FrankaGenesisSim:
         self.urdf_path = assets_dir / "urdf/panda_bullet/panda.urdf"
 
         logger.info(f"Using Genesis XML path: {self.xml_path}")
+
+        self.gripper_action_lock = threading.Lock()
 
     def load_panda_model(self):
         pass
@@ -114,6 +118,13 @@ class FrankaGenesisSim:
         ]
         self.dofs_idx = [self.franka.get_joint(name).dof_idx_local for name in self.jnt_names]
 
+        self.gripper_jnt_names = [
+            "finger_joint1",
+            "finger_joint2",
+        ]
+        self.gripper_dofs_idx = [
+            self.franka.get_joint(name).dof_idx_local for name in self.gripper_jnt_names
+        ]
         # Set force range for safety
         self.franka.set_dofs_force_range(
             lower=np.array([-87, -87, -87, -87, -12, -12, -12, -100, -100]),
@@ -155,6 +166,50 @@ class FrankaGenesisSim:
         with self.joint_velocity_lock:
             self.latest_joint_velocities = np.array(velocities)
 
+    def homming_gripper(self):
+
+        # TODO: fix this, # homing: which calibrates the maximum grasping width of the Hand.
+        def gripper_motion():
+            with self.gripper_action_lock:
+                logging.debug("Homing gripper ...")
+
+                start_time = time.time()
+                while time.time() - start_time < 4:
+                    t = 0.04 + 0.04 * np.sin((time.time() % 4) * (2 * np.pi / 4))
+                    self.gripper_positions = [t, t]
+                    time.sleep(0.01)  # Small delay to prevent high CPU usage
+                logging.debug("Homing gripper Done")
+
+        threading.Thread(target=gripper_motion, daemon=True).start()
+
+    def gripper_grasp(self, graspCmd: GraspCommand):
+        def grasp():
+            with self.gripper_action_lock:
+                logging.debug("Gripper Grasp  ...")
+
+                t = self.gripper_positions[0]
+                while np.abs(self.gripper_positions[0] - graspCmd.width) > 1e-3:
+                    t = t-graspCmd.speed*0.1 if self.gripper_positions[0] - graspCmd.width > 0 else t+graspCmd.speed*0.1
+                    self.gripper_positions = [t, t]
+                    time.sleep(0.01)  # Small delay to prevent high CPU usage
+                logging.debug("Gripper Grasp  Done")
+
+        threading.Thread(target=grasp, daemon=True).start()
+
+    def gripper_move(self, cmd: MoveCommand):
+        def move():
+            with self.gripper_action_lock:
+                logging.debug("Gripper Move  ...")
+
+                t = self.gripper_positions[0]
+                while np.abs(self.gripper_positions[0] - cmd.width) > 1e-3:
+                    t = t-cmd.speed*0.1 if self.gripper_positions[0] - cmd.width > 0 else t+cmd.speed*0.1
+                    self.gripper_positions = [t, t]
+                    time.sleep(0.01)  # Small delay to prevent high CPU usage
+                logging.debug("Gripper Move  Done")
+
+        threading.Thread(target=move, daemon=True).start()
+
     def run_simulation(self):
         """Main simulation loop"""
         logger.info("Starting Genesis simulation loop")
@@ -182,7 +237,8 @@ class FrankaGenesisSim:
             if current_mode == ControlMode.POSITION:
                 with self.joint_position_lock:
                     q_d = self.latest_joint_positions.copy()
-                q_cmd = np.concatenate([q_d, [0.04, 0.04]])
+
+                q_cmd = np.concatenate([q_d, self.gripper_positions])
                 self.franka.control_dofs_position(q_cmd, self.dofs_idx)
 
             elif current_mode == ControlMode.VELOCITY:
@@ -279,6 +335,32 @@ class FrankaGenesisSim:
             "tau_J": self.latest_torques,  # Current commanded torques
             "O_T_EE": O_T_EE,  # End-effector pose in base frame (column-major)
         }
+    
+    def get_gripper_state(self):
+        """Get current gripper state"""
+        gripper_joints = ["finger_joint1", "finger_joint2"] # genesis's urdf
+        gripper_positions = [
+            self.franka.get_joint(name).get_pos().cpu().numpy() for name in gripper_joints
+        ]
+        # logging.info(f"Gripper positions: {gripper_positions}")
+        width = gripper_positions[0] - gripper_positions[1]
+        width = np.linalg.norm(width)  # Calculate width as the distance between the two gripper joints
+        width = np.clip(width, 0.0, 0.08)  # Clamp width to [0, max_width]
+        # logging.info(f"Gripper width: {width}")
+        
+        max_width = 0.08  # Maximum gripper width (example value)
+        is_grasped = width < 0.02  # Example threshold for determining if grasped
+        temperature = 0  # Placeholder for gripper temperature
+        t = time.time()  # Current simulation time
+
+        return {
+            "width": width,
+            "max_width": max_width,
+            "is_grasped": is_grasped,
+            "temperature": temperature,
+            "time": t,
+        }
+    
 
 
 def main():

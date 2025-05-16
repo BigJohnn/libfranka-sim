@@ -14,7 +14,6 @@ class RobotState:
     def __init__(self):
         """Initialize the robot state with default values"""
         self.state = self._initialize_state()
-        logger.info("Robot state initialized")
 
     def _initialize_state(self) -> Dict[str, Any]:
         """Initialize the robot state dictionary with default values"""

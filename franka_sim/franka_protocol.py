@@ -4,8 +4,6 @@ from dataclasses import dataclass
 
 # Standard command port for Franka robot interface
 COMMAND_PORT = 1337
-
-
 class Command(enum.IntEnum):
     """Commands supported by the Franka robot interface protocol"""
 
@@ -32,6 +30,23 @@ class ConnectStatus(enum.IntEnum):
 
 
 class MoveStatus(enum.IntEnum):
+    """
+    MoveStatus 枚举类表示 Move 命令的状态码。
+
+    枚举值:
+        kSuccess (0): 操作成功完成。
+        kMotionStarted (1): 运动已开始。
+        kPreempted (2): 操作被抢占。
+        kPreemptedDueToActivatedSafetyFunctions (3): 由于安全功能激活，操作被抢占。
+        kCommandRejectedDueToActivatedSafetyFunctions (4): 由于安全功能激活，命令被拒绝。
+        kCommandNotPossibleRejected (5): 命令不可执行，被拒绝。
+        kStartAtSingularPoseRejected (6): 起始于奇异姿态的命令被拒绝。
+        kInvalidArgumentRejected (7): 无效参数导致命令被拒绝。
+        kReflexAborted (8): 由于反射机制，操作被中止。
+        kEmergencyAborted (9): 由于紧急情况，操作被中止。
+        kInputErrorAborted (10): 输入错误导致操作被中止。
+        kAborted (11): 操作被中止。
+    """
     """Status codes for Move command"""
 
     kSuccess = 0
